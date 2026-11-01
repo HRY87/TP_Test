@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>
+<CodeBlocks_project_file>
+	<FileVersion major="1" minor="6" />
+	<Project>
+		<Option title="TP_AyED" />
+		<Option pch_mode="2" />
+		<Option compiler="gcc" />
+		<Build>
+			<Target title="Debug">
+				<Option output="bin/Debug/TP_AyED" prefix_auto="1" extension_auto="1" />
+				<Option object_output="obj/Debug/" />
+				<Option type="1" />
+				<Option compiler="gcc" />
+				<Compiler>
+					<Add option="-g" />
+				</Compiler>
+			</Target>
+			<Target title="Release">
+				<Option output="bin/Release/TP_AyED" prefix_auto="1" extension_auto="1" />
+				<Option object_output="obj/Release/" />
+				<Option type="1" />
+				<Option compiler="gcc" />
+				<Compiler>
+					<Add option="-O2" />
+				</Compiler>
+				<Linker>
+					<Add option="-s" />
+				</Linker>
+			</Target>
+		</Build>
+		<Compiler>
+			<Add option="-Wall" />
+		</Compiler>
+		<Unit filename="Arbol/Arbol.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="Arbol/Arbol.h" />
+		<Unit filename="LDE/ListaDobleEnlazada.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="LDE/ListaDobleEnlazada.h" />
+		<Unit filename="Lista/Lista.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="Lista/Lista.h" />
+		<Unit filename="LruCacheLista/LruCacheLista.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="LruCacheLista/LruCacheLista.h" />
+		<Unit filename="LruCache/LruCache.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="LruCache/LruCache.h" />
+		<Unit filename="Test/TestPart1.h" />
+		<Unit filename="Test/TestParte1.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="Test/TestParte2.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="Test/TestParte2.h" />
+		<Unit filename="main.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Extensions>
+			<lib_finder disable_auto="1" />
+		</Extensions>
+	</Project>
+</CodeBlocks_project_file>
