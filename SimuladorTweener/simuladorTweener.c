@@ -14,9 +14,9 @@
 
 static const tEstrategia estrategias[] =
 {
-    {"SIN CACHE",                           0, scCrear, scObtener, scAgregar, scVaciar, NULL},
-    {"PARTE 1 - lista simple",              1, lCrear,  lObtener,  lAgregar,  lVaciar,  NULL},
-    {"PARTE 2 - lista doble + arbol indice", 1, aCrear,  aObtener,  aAgregar,  aVaciar,  aAltura}
+    {"SIN CACHE",                            0, scCrear, scObtener, scAgregar, scVictima, scVaciar, NULL},
+    {"PARTE 1 - lista simple",               1, lCrear,  lObtener,  lAgregar,  lVictima,  lVaciar,  NULL},
+    {"PARTE 2 - lista doble + arbol indice", 1, aCrear,  aObtener,  aAgregar,  aVictima,  aVaciar,  aAltura}
 };
 
 static const unsigned capacidades[] = {10, 100, 1000, 10000};
@@ -74,7 +74,7 @@ void scCrear(tCache *c, unsigned cap)
     (void)cap;
 }
 
-/* Siempre informa que no encontro el dato */
+/* Siempre informa que no encontro el dato (0) */
 int scObtener(tCache *c, const void *clave, void *dato, unsigned tam)
 {
     (void)c;
@@ -82,7 +82,7 @@ int scObtener(tCache *c, const void *clave, void *dato, unsigned tam)
     (void)dato;
     (void)tam;
 
-    return TODO_BIEN;
+    return 0;
 }
 
 /* No guarda nada */
@@ -92,6 +92,14 @@ void scAgregar(tCache *c, const void *clave, const void *dato, unsigned tam)
     (void)clave;
     (void)dato;
     (void)tam;
+}
+
+/* Nunca descarta nada */
+tPosteo *scVictima(tCache *c)
+{
+    (void)c;
+
+    return NULL;
 }
 
 /* No hay nada que liberar */
@@ -120,6 +128,21 @@ void lAgregar(tCache *c, const void *clave, const void *dato, unsigned tam)
     agregar_lrucache(&c->lista, clave, dato, tam);
 }
 
+/* Devuelve el valor del ultimo nodo (el que descartara el proximo agregado) si la
+   cache esta llena; NULL si todavia hay lugar. Solo lee la lista, no la modifica. */
+tPosteo *lVictima(tCache *c)
+{
+    const tLista *pl = &c->lista.lista;
+
+    if(c->lista.cantidad < c->lista.capacidad || !*pl)
+        return NULL;
+
+    while((*pl)->sig)
+        pl = &(*pl)->sig;
+
+    return ((const tDatoCache *)(*pl)->info)->valor;
+}
+
 /* Libera la cache de la Parte 1 */
 void lVaciar(tCache *c)
 {
@@ -146,6 +169,20 @@ void aAgregar(tCache *c, const void *clave, const void *dato, unsigned tam)
     agregar_lrucache_indice(&c->arbol, clave, dato, tam);
 }
 
+/* Devuelve el valor del ultimo nodo de la lista doble (el que descartara el proximo
+   agregado) si la cache esta llena; NULL si todavia hay lugar. Es O(1). */
+tPosteo *aVictima(tCache *c)
+{
+    const tDatoCache_indice *dato;
+
+    if(c->arbol.cantidad < c->arbol.capacidad)
+        return NULL;
+
+    dato = obtenerInfoNodoLDE(c->arbol.lista.ultimo);
+
+    return dato ? dato->valor : NULL;
+}
+
 /* Libera la cache de la Parte 2 */
 void aVaciar(tCache *c)
 {
@@ -160,15 +197,14 @@ unsigned aAltura(tCache *c)
 
 /* ---------- fuentes de datos ---------- */
 
-/* Abre usuarios y posteos y reserva la tabla de casilleros. Deja todo inicializado
-   para que cerrarFuentes sea siempre seguro, incluso si esto falla.
+/* Abre usuarios y posteos. Deja ambos punteros inicializados para que cerrarFuentes
+   sea siempre seguro, incluso si esto falla.
    Posteos sin buffer: cada lectura es un registro directo (acceso aleatorio), un
    buffer solo traeria bytes de mas. Usuarios con buffer grande: se leen en orden. */
 int abrirFuentes(tFuentes *f, const char *nombreUsuarios)
 {
     long bytes;
 
-    f->casilleros = NULL;
     f->pfUsuarios = fopen(nombreUsuarios, "rb");
     f->pfPosteos = fopen(NOMBRE_POSTEOS, "rb");
 
@@ -182,25 +218,12 @@ int abrirFuentes(tFuentes *f, const char *nombreUsuarios)
     bytes = ftell(f->pfUsuarios);
     rewind(f->pfUsuarios);
 
-    if(bytes < (long)sizeof(tUsuario))
-        return SIM_ERROR_ARCHIVO;
-
-    f->casilleros = malloc(CANT_POSTEOS * sizeof(tPosteo));
-
-    if(!f->casilleros)
-        return SIM_SIN_MEM;
-
-    /* Se toca toda la tabla ahora para que los fallos de pagina no entren en los tiempos */
-    memset(f->casilleros, 0, CANT_POSTEOS * sizeof(tPosteo));
-
-    return SIM_OK;
+    return bytes < (long)sizeof(tUsuario) ? SIM_ERROR_ARCHIVO : SIM_OK;
 }
 
-/* Libera todo lo que abrirFuentes haya conseguido */
+/* Cierra los archivos que abrirFuentes haya conseguido abrir */
 void cerrarFuentes(tFuentes *f)
 {
-    free(f->casilleros);
-
     if(f->pfUsuarios)
         fclose(f->pfUsuarios);
 
@@ -208,33 +231,28 @@ void cerrarFuentes(tFuentes *f)
         fclose(f->pfPosteos);
 }
 
-/* Lectura directa (el id es la posicion del registro) en su casillero de la tabla.
-   Devuelve el casillero, o NULL si el id es invalido o falla la lectura. */
-tPosteo *leerPosteo(FILE *pf, tPosteo *casilleros, int id)
+/* Lectura directa (el id es la posicion del registro) en 'destino'.
+   Devuelve 0 si el id es invalido o falla la lectura. */
+int leerPosteo(FILE *pf, tPosteo *destino, int id)
 {
-    tPosteo *casillero;
-
-    if(id < 0 || id >= CANT_POSTEOS)
-        return NULL;
-
-    casillero = casilleros + id;
-
-    if(fseek(pf, (long)id * (long)sizeof(tPosteo), SEEK_SET) != 0
-            || fread(casillero, sizeof(*casillero), 1, pf) != 1
-            || casillero->id != id)
-        return NULL;
-
-    return casillero;
+    return id >= 0 && id < CANT_POSTEOS
+           && fseek(pf, (long)id * (long)sizeof(tPosteo), SEEK_SET) == 0
+           && fread(destino, sizeof(*destino), 1, pf) == 1
+           && destino->id == id;
 }
 
 /* ---------- simulacion ---------- */
 
-/* Busca un posteo en la cache; si falla lo lee del archivo y lo agrega a la cache.
-   Devuelve 0 si no pudo leerlo. Los datos obtenidos se descartan. */
-int obtenerPosteo(const tEstrategia *e, tCache *c, const tFuentes *f, int id, tContadores *k)
+/* Busca un posteo en la cache; si falla lo lee del archivo al casillero libre y lo
+   agrega a la cache. Antes de agregar se consulta que posteo va a salir: su casillero
+   no se puede pisar hasta que termine el agregado (la cache lo usa para borrarlo), y
+   despues pasa a ser el casillero libre. Mientras la cache no se llena, el casillero
+   libre es simplemente el siguiente. Devuelve 0 si no pudo leerlo. Los datos
+   obtenidos se descartan. */
+int obtenerPosteo(const tEstrategia *e, tCache *c, const tFuentes *f, tPosteo **libre, int id, tContadores *k)
 {
     tPosteo descartado;
-    tPosteo *casillero;
+    tPosteo *victima;
 
     if(e->obtener(c, &id, &descartado, sizeof(descartado)))
     {
@@ -244,18 +262,21 @@ int obtenerPosteo(const tEstrategia *e, tCache *c, const tFuentes *f, int id, tC
 
     k->fallos++;
     k->lecturas++;
-    casillero = leerPosteo(f->pfPosteos, f->casilleros, id);
 
-    if(!casillero)
+    if(!leerPosteo(f->pfPosteos, *libre, id))
         return 0;
 
-    e->agregar(c, &casillero->id, casillero, sizeof(*casillero));
+    victima = e->victima(c);
+    e->agregar(c, &(*libre)->id, *libre, sizeof(**libre));
+
+    if(e->usaCache)
+        *libre = victima ? victima : *libre + 1;
 
     return 1;
 }
 
 /* Procesa todos los posteos del feed de un usuario */
-int procesarUsuario(const tEstrategia *e, tCache *c, const tFuentes *f, const tUsuario *usu, tContadores *k)
+int procesarUsuario(const tEstrategia *e, tCache *c, const tFuentes *f, tPosteo **libre, const tUsuario *usu, tContadores *k)
 {
     const int *p = usu->feed;
     const int *fin = usu->feed + LARGO_FEED;
@@ -263,27 +284,34 @@ int procesarUsuario(const tEstrategia *e, tCache *c, const tFuentes *f, const tU
 
     while(p < fin && ok)
     {
-        ok = obtenerPosteo(e, c, f, *p, k);
+        ok = obtenerPosteo(e, c, f, libre, *p, k);
         p++;
     }
 
     return ok;
 }
 
-/* Realiza una simulacion completa con una cache nueva, leyendo los usuarios de a uno */
+/* Realiza una simulacion completa con una cache nueva, leyendo los usuarios de a uno.
+   Los casilleros (capacidad + 1) se reservan al empezar y se liberan al terminar. */
 int realizarSimulacion(const tEstrategia *e, unsigned capacidad, const tFuentes *f, tContadores *k)
 {
     tCache c;
     tUsuario usu;
+    tPosteo *casilleros = malloc((capacidad + 1) * sizeof(tPosteo));
+    tPosteo *libre = casilleros;
     int ok = 1;
 
     memset(k, 0, sizeof(*k));
+
+    if(!casilleros)
+        return 0;
+
     rewind(f->pfUsuarios);
     e->crear(&c, capacidad);
 
     while(ok && fread(&usu, sizeof(usu), 1, f->pfUsuarios) == 1)
     {
-        ok = procesarUsuario(e, &c, f, &usu, k);
+        ok = procesarUsuario(e, &c, f, &libre, &usu, k);
         k->usuarios++;
     }
 
@@ -291,6 +319,7 @@ int realizarSimulacion(const tEstrategia *e, unsigned capacidad, const tFuentes 
         k->altura = e->altura(&c);
 
     e->vaciar(&c);
+    free(casilleros);
 
     return ok;
 }
@@ -420,8 +449,6 @@ int ejecutarSimulacion(const char *tipo, int repeticiones)
 
     if(res == SIM_OK)
         res = simularLote(tipo, repeticiones, &f);
-    else if(res == SIM_SIN_MEM)
-        printf("Sin memoria\n");
     else
         printf("No se pudo leer %s o %s (generalos con las opciones 1 a 3)\n", nombre, NOMBRE_POSTEOS);
 
