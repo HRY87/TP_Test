@@ -43,14 +43,27 @@
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="Lista/Lista.h" />
-		<Unit filename="LruCacheLista/LruCacheLista.c">
-			<Option compilerVar="CC" />
-		</Unit>
-		<Unit filename="LruCacheLista/LruCacheLista.h" />
 		<Unit filename="LruCache/LruCache.c">
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="LruCache/LruCache.h" />
+		<Unit filename="LruCacheLista/LruCacheLista.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="LruCacheLista/LruCacheLista.h" />
+		<Unit filename="Lotes/exportador.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="Lotes/exportador.h" />
+		<Unit filename="Lotes/generadorLotes.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="Lotes/generadorLotes.h" />
+		<Unit filename="SimuladorTweener/registros.h" />
+		<Unit filename="SimuladorTweener/simuladorTweener.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="SimuladorTweener/simuladorTweener.h" />
 		<Unit filename="Test/TestPart1.h" />
 		<Unit filename="Test/TestParte1.c">
 			<Option compilerVar="CC" />
