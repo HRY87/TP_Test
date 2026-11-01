@@ -1,56 +1,57 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <time.h>
+#endif
+
 #include "simuladorTweener.h"
-#include "registros.h"
-#include "../LruCacheLista/LruCacheLista.h"
-#include "../LruCache/LruCache.h"
 
-/* Las dos caches comparten espacio: en cada simulacion se usa solo una */
-typedef union
-{
-    tLruCacheLista lista;
-    tLruCache arbol;
-} tCache;
+#define TAM_BUFFER_USUARIOS  65536
 
-/* Cada variante se maneja con las mismas operaciones */
-typedef struct
+static const tEstrategia estrategias[] =
 {
-    const char *nombre;
-    void     (*crear)(tCache *c, unsigned capacidad);
-    int      (*obtener)(tCache *c, const void *clave, void *dato, unsigned tamDato);   /* distinto de 0 si lo encontro */
-    void     (*agregar)(tCache *c, const void *clave, const void *dato, unsigned tamDato);
-    void     (*vaciar)(tCache *c);
-    unsigned (*altura)(tCache *c);                                                      /* NULL si no aplica */
-} tEstrategia;
+    {"SIN CACHE",                           0, scCrear, scObtener, scAgregar, scVaciar, NULL},
+    {"PARTE 1 - lista simple",              1, lCrear,  lObtener,  lAgregar,  lVaciar,  NULL},
+    {"PARTE 2 - lista doble + arbol indice", 1, aCrear,  aObtener,  aAgregar,  aVaciar,  aAltura}
+};
 
-typedef struct
-{
-    unsigned long aciertos;
-    unsigned long fallos;
-    unsigned long lecturas;
-    unsigned altura;
-} tContadores;
+static const unsigned capacidades[] = {10, 100, 1000, 10000};
+static const unsigned sinCapacidad[] = {0};
 
-/* Recursos compartidos por todas las simulaciones de un lote.
-   Las caches de este proyecto guardan PUNTEROS a la clave y al valor (no copias),
-   asi que ese almacenamiento lo pone la simulacion: 'tabla' tiene un casillero por
-   id de posteo. Un casillero solo se escribe cuando su id NO esta en la cache (fallo),
-   por lo que nunca se pisa un dato que la cache este referenciando. La tabla no se
-   consulta nunca para decidir aciertos: eso lo decide solo la cache. */
-typedef struct
+/* ---------- tiempo ---------- */
+
+/* Devuelve un tiempo monotonico en milisegundos. Se mide tiempo REAL (no de CPU):
+   lo que la cache ahorra es espera de disco, que clock() no cuenta en Linux. */
+#ifdef _WIN32
+double obtenerTiempoMs(void)
 {
-    FILE *pf;
-    tPosteo *tabla;
-    tUsuario *usu;
-    size_t cant;
-} tEscenario;
+    LARGE_INTEGER frecuencia;
+    LARGE_INTEGER cuenta;
+
+    QueryPerformanceFrequency(&frecuencia);
+    QueryPerformanceCounter(&cuenta);
+
+    return (double)cuenta.QuadPart * 1000.0 / (double)frecuencia.QuadPart;
+}
+#else
+double obtenerTiempoMs(void)
+{
+    struct timespec ts;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+}
+#endif
 
 /* ---------- comparadores ---------- */
 
 /* Compara dos claves enteras sin riesgo de desbordamiento */
-static int cmpClaveInt(const void *a, const void *b)
+int cmpClaveInt(const void *a, const void *b)
 {
     int x = *(const int *)a;
     int y = *(const int *)b;
@@ -58,171 +59,165 @@ static int cmpClaveInt(const void *a, const void *b)
     return (x > y) - (x < y);
 }
 
-/* Compara dos tDatoCache por su clave entera (la Parte 1 compara entradas completas).
-   Si tu Parte 1 llama al comparador con claves crudas, usar cmpClaveInt en lCrear. */
-static int cmpDatoCacheInt(const void *a, const void *b)
+/* Compara dos tDatoCache por su clave entera (la Parte 1 compara entradas completas) */
+int cmpDatoCacheInt(const void *a, const void *b)
 {
     return cmpClaveInt(((const tDatoCache *)a)->clave, ((const tDatoCache *)b)->clave);
 }
 
 /* ---------- adaptadores: sin cache (siempre falla y no guarda nada) ---------- */
 
-static void scCrear(tCache *c, unsigned cap)
+/* No hay nada que crear */
+void scCrear(tCache *c, unsigned cap)
 {
+    (void)c;
+    (void)cap;
 }
 
-static int scObtener(tCache *c, const void *clave, void *dato, unsigned tam)
+/* Siempre informa que no encontro el dato */
+int scObtener(tCache *c, const void *clave, void *dato, unsigned tam)
 {
-    return 0;
+    (void)c;
+    (void)clave;
+    (void)dato;
+    (void)tam;
+
+    return TODO_BIEN;
 }
 
-static void scAgregar(tCache *c, const void *clave, const void *dato, unsigned tam)
+/* No guarda nada */
+void scAgregar(tCache *c, const void *clave, const void *dato, unsigned tam)
 {
+    (void)c;
+    (void)clave;
+    (void)dato;
+    (void)tam;
 }
 
-static void scVaciar(tCache *c)
+/* No hay nada que liberar */
+void scVaciar(tCache *c)
 {
+    (void)c;
 }
 
 /* ---------- adaptadores: Parte 1 (lista simple) ---------- */
 
-static void lCrear(tCache *c, unsigned cap)
+/* Crea la cache de la Parte 1 */
+void lCrear(tCache *c, unsigned cap)
 {
     crear_lrucache(&c->lista, cap, sizeof(int), cmpDatoCacheInt);
 }
 
-static int lObtener(tCache *c, const void *clave, void *dato, unsigned tam)
+/* Busca en la cache de la Parte 1 */
+int lObtener(tCache *c, const void *clave, void *dato, unsigned tam)
 {
     return obtener_lrucache(&c->lista, clave, dato, tam);
 }
 
-static void lAgregar(tCache *c, const void *clave, const void *dato, unsigned tam)
+/* Agrega a la cache de la Parte 1 */
+void lAgregar(tCache *c, const void *clave, const void *dato, unsigned tam)
 {
     agregar_lrucache(&c->lista, clave, dato, tam);
 }
 
-static void lVaciar(tCache *c)
+/* Libera la cache de la Parte 1 */
+void lVaciar(tCache *c)
 {
     vaciar_lrucache(&c->lista);
 }
 
 /* ---------- adaptadores: Parte 2 (lista doble + arbol indice) ---------- */
 
-static void aCrear(tCache *c, unsigned cap)
+/* Crea la cache de la Parte 2 */
+void aCrear(tCache *c, unsigned cap)
 {
     crear_lrucache_indice(&c->arbol, cap, sizeof(int), cmpClaveInt);
 }
 
-static int aObtener(tCache *c, const void *clave, void *dato, unsigned tam)
+/* Busca en la cache de la Parte 2 */
+int aObtener(tCache *c, const void *clave, void *dato, unsigned tam)
 {
     return obtener_lrucache_indice(&c->arbol, clave, dato, tam);
 }
 
-static void aAgregar(tCache *c, const void *clave, const void *dato, unsigned tam)
+/* Agrega a la cache de la Parte 2 */
+void aAgregar(tCache *c, const void *clave, const void *dato, unsigned tam)
 {
     agregar_lrucache_indice(&c->arbol, clave, dato, tam);
 }
 
-static void aVaciar(tCache *c)
+/* Libera la cache de la Parte 2 */
+void aVaciar(tCache *c)
 {
     vaciar_lrucache_indice(&c->arbol);
 }
 
-static unsigned aAltura(tCache *c)
+/* Altura del arbol indice de la Parte 2 */
+unsigned aAltura(tCache *c)
 {
     return altura_arbol_indice(&c->arbol);
 }
 
-static const tEstrategia estrategias[] =
-{
-    {"sin cache", scCrear, scObtener, scAgregar, scVaciar, NULL},
-    {"parte 1",   lCrear,  lObtener,  lAgregar,  lVaciar,  NULL},
-    {"parte 2",   aCrear,  aObtener,  aAgregar,  aVaciar,  aAltura}
-};
+/* ---------- fuentes de datos ---------- */
 
-/* ---------- recursos del lote ---------- */
-
-/* Lee todo el archivo de usuarios en memoria; NULL si falla o esta vacio */
-static tUsuario *cargarUsuarios(const char *nombre, size_t *cant)
+/* Abre usuarios y posteos y reserva la tabla de casilleros. Deja todo inicializado
+   para que cerrarFuentes sea siempre seguro, incluso si esto falla.
+   Posteos sin buffer: cada lectura es un registro directo (acceso aleatorio), un
+   buffer solo traeria bytes de mas. Usuarios con buffer grande: se leen en orden. */
+int abrirFuentes(tFuentes *f, const char *nombreUsuarios)
 {
-    FILE *pf = fopen(nombre, "rb");
-    tUsuario *usu = NULL;
     long bytes;
 
-    *cant = 0;
+    f->casilleros = NULL;
+    f->pfUsuarios = fopen(nombreUsuarios, "rb");
+    f->pfPosteos = fopen(NOMBRE_POSTEOS, "rb");
 
-    if(!pf)
-        return NULL;
-
-    fseek(pf, 0, SEEK_END);
-    bytes = ftell(pf);
-    rewind(pf);
-
-    *cant = (size_t)bytes / sizeof(tUsuario);
-
-    if(*cant > 0)
-        usu = malloc(*cant * sizeof(tUsuario));
-
-    if(usu && fread(usu, sizeof(tUsuario), *cant, pf) != *cant)
-    {
-        free(usu);
-        usu = NULL;
-    }
-
-    fclose(pf);
-
-    return usu;
-}
-
-/* Prepara usuarios, archivo de posteos y tabla de casilleros. Deja todo inicializado
-   para que cerrarEscenario sea siempre seguro, incluso si esto falla. */
-static int abrirEscenario(tEscenario *esc, const char *nombreUsuarios)
-{
-    esc->pf = NULL;
-    esc->tabla = NULL;
-    esc->usu = cargarUsuarios(nombreUsuarios, &esc->cant);
-
-    if(!esc->usu)
+    if(!f->pfUsuarios || !f->pfPosteos)
         return SIM_ERROR_ARCHIVO;
 
-    esc->pf = fopen(NOMBRE_POSTEOS, "rb");
+    setvbuf(f->pfPosteos, NULL, _IONBF, 0);
+    setvbuf(f->pfUsuarios, NULL, _IOFBF, TAM_BUFFER_USUARIOS);
 
-    if(!esc->pf)
+    fseek(f->pfUsuarios, 0, SEEK_END);
+    bytes = ftell(f->pfUsuarios);
+    rewind(f->pfUsuarios);
+
+    if(bytes < (long)sizeof(tUsuario))
         return SIM_ERROR_ARCHIVO;
 
-    esc->tabla = malloc(CANT_POSTEOS * sizeof(tPosteo));
+    f->casilleros = malloc(CANT_POSTEOS * sizeof(tPosteo));
 
-    if(!esc->tabla)
+    if(!f->casilleros)
         return SIM_SIN_MEM;
 
     /* Se toca toda la tabla ahora para que los fallos de pagina no entren en los tiempos */
-    memset(esc->tabla, 0, CANT_POSTEOS * sizeof(tPosteo));
+    memset(f->casilleros, 0, CANT_POSTEOS * sizeof(tPosteo));
 
     return SIM_OK;
 }
 
-/* Libera todo lo que abrirEscenario haya conseguido */
-static void cerrarEscenario(tEscenario *esc)
+/* Libera todo lo que abrirFuentes haya conseguido */
+void cerrarFuentes(tFuentes *f)
 {
-    free(esc->tabla);
-    free(esc->usu);
+    free(f->casilleros);
 
-    if(esc->pf)
-        fclose(esc->pf);
+    if(f->pfUsuarios)
+        fclose(f->pfUsuarios);
+
+    if(f->pfPosteos)
+        fclose(f->pfPosteos);
 }
-
-/* ---------- simulacion ---------- */
 
 /* Lectura directa (el id es la posicion del registro) en su casillero de la tabla.
    Devuelve el casillero, o NULL si el id es invalido o falla la lectura. */
-static tPosteo *leerPosteo(FILE *pf, tPosteo *tabla, int id)
+tPosteo *leerPosteo(FILE *pf, tPosteo *casilleros, int id)
 {
     tPosteo *casillero;
 
     if(id < 0 || id >= CANT_POSTEOS)
         return NULL;
 
-    casillero = tabla + id;
+    casillero = casilleros + id;
 
     if(fseek(pf, (long)id * (long)sizeof(tPosteo), SEEK_SET) != 0
             || fread(casillero, sizeof(*casillero), 1, pf) != 1
@@ -232,53 +227,64 @@ static tPosteo *leerPosteo(FILE *pf, tPosteo *tabla, int id)
     return casillero;
 }
 
-/* Busca cada posteo del feed en la cache y, si falla, en el archivo (y lo agrega a la cache) */
-static int procesarUsuario(const tEstrategia *e, tCache *c, const tEscenario *esc,
-                           const tUsuario *usu, tContadores *k)
+/* ---------- simulacion ---------- */
+
+/* Busca un posteo en la cache; si falla lo lee del archivo y lo agrega a la cache.
+   Devuelve 0 si no pudo leerlo. Los datos obtenidos se descartan. */
+int obtenerPosteo(const tEstrategia *e, tCache *c, const tFuentes *f, int id, tContadores *k)
+{
+    tPosteo descartado;
+    tPosteo *casillero;
+
+    if(e->obtener(c, &id, &descartado, sizeof(descartado)))
+    {
+        k->aciertos++;
+        return 1;
+    }
+
+    k->fallos++;
+    k->lecturas++;
+    casillero = leerPosteo(f->pfPosteos, f->casilleros, id);
+
+    if(!casillero)
+        return 0;
+
+    e->agregar(c, &casillero->id, casillero, sizeof(*casillero));
+
+    return 1;
+}
+
+/* Procesa todos los posteos del feed de un usuario */
+int procesarUsuario(const tEstrategia *e, tCache *c, const tFuentes *f, const tUsuario *usu, tContadores *k)
 {
     const int *p = usu->feed;
     const int *fin = usu->feed + LARGO_FEED;
-    tPosteo descartado;
-    tPosteo *casillero;
     int ok = 1;
 
     while(p < fin && ok)
     {
-        if(e->obtener(c, p, &descartado, sizeof(descartado)))
-            k->aciertos++;
-        else
-        {
-            k->fallos++;
-            k->lecturas++;
-            casillero = leerPosteo(esc->pf, esc->tabla, *p);
-            ok = casillero != NULL;
-
-            if(ok)
-                e->agregar(c, &casillero->id, casillero, sizeof(*casillero));
-        }
-
+        ok = obtenerPosteo(e, c, f, *p, k);
         p++;
     }
 
     return ok;
 }
 
-/* Realiza una simulacion completa con una cache nueva. Los datos leidos se descartan. */
-static int realizarSimulacion(const tEstrategia *e, unsigned capacidad,
-                              const tEscenario *esc, tContadores *k)
+/* Realiza una simulacion completa con una cache nueva, leyendo los usuarios de a uno */
+int realizarSimulacion(const tEstrategia *e, unsigned capacidad, const tFuentes *f, tContadores *k)
 {
     tCache c;
-    const tUsuario *u = esc->usu;
-    const tUsuario *fin = esc->usu + esc->cant;
+    tUsuario usu;
     int ok = 1;
 
     memset(k, 0, sizeof(*k));
+    rewind(f->pfUsuarios);
     e->crear(&c, capacidad);
 
-    while(u < fin && ok)
+    while(ok && fread(&usu, sizeof(usu), 1, f->pfUsuarios) == 1)
     {
-        ok = procesarUsuario(e, &c, esc, u, k);
-        u++;
+        ok = procesarUsuario(e, &c, f, &usu, k);
+        k->usuarios++;
     }
 
     if(e->altura)
@@ -289,93 +295,137 @@ static int realizarSimulacion(const tEstrategia *e, unsigned capacidad,
     return ok;
 }
 
-/* Repite la simulacion, promedia los tiempos e imprime una fila de la tabla */
-static int medirYMostrarFila(const tEstrategia *e, unsigned capacidad, int repeticiones,
-                             const tEscenario *esc)
+/* Repite la simulacion y devuelve el tiempo promedio de una en ms (negativo si hubo error).
+   Solo se mide la simulacion: la impresion queda afuera. */
+double medirSimulacion(const tEstrategia *e, unsigned capacidad, int repeticiones,
+                       const tFuentes *f, tContadores *k)
 {
-    tContadores k;
-    clock_t ini = clock();
-    double ms;
+    double inicio = obtenerTiempoMs();
     int i;
     int ok = 1;
 
     for(i = 0; i < repeticiones && ok; i++)
-        ok = realizarSimulacion(e, capacidad, esc, &k);
+        ok = realizarSimulacion(e, capacidad, f, k);
 
-    ms = (double)(clock() - ini) * 1000.0 / CLOCKS_PER_SEC / repeticiones;
+    return ok ? (obtenerTiempoMs() - inicio) / repeticiones : -1.0;
+}
 
-    if(!ok)
-    {
-        printf("%-10s error durante la simulacion\n", e->nombre);
-        return 0;
-    }
+/* ---------- presentacion ---------- */
 
-    printf("%-10s ", e->nombre);
+/* Imprime el titulo del bloque y los nombres de las columnas */
+void mostrarEncabezado(const tEstrategia *e)
+{
+    printf("\n[%s]\n", e->nombre);
+    printf("%8s %10s %12s %11s %9s %7s %9s",
+           "capacid.", "total(ms)", "us/usuario", "us/posteo", "aciertos", "fallos", "lecturas");
 
+    if(e->altura)
+        printf(" %6s", "altura");
+
+    printf(" %8s\n", "mejora");
+}
+
+/* Imprime una fila. Los promedios por usuario y por posteo salen del tiempo total
+   (un posteo solo puede durar menos que la resolucion del reloj). 'mejora' compara
+   contra el tiempo sin cache. */
+void mostrarFila(const tEstrategia *e, unsigned capacidad, double ms, double msBase, const tContadores *k)
+{
     if(capacidad)
         printf("%8u ", capacidad);
     else
         printf("%8s ", "-");
 
-    printf("%10.2f %12.2f %11.3f %9lu %7lu %9lu ",
+    printf("%10.2f %12.2f %11.3f %9lu %7lu %9lu",
            ms,
-           ms * 1000.0 / (double)esc->cant,
-           ms * 1000.0 / ((double)esc->cant * LARGO_FEED),
-           k.aciertos, k.fallos, k.lecturas);
+           ms * 1000.0 / (double)k->usuarios,
+           ms * 1000.0 / ((double)k->usuarios * LARGO_FEED),
+           k->aciertos, k->fallos, k->lecturas);
 
     if(e->altura)
-        printf("%6u\n", k.altura);
-    else
-        printf("%6s\n", "-");
+        printf(" %6u", k->altura);
 
-    return 1;
+    printf(" %7.2fx\n", msBase / ms);
 }
 
-/* Ejecuta todas las variantes y capacidades sobre un lote y muestra la tabla */
+/* Muestra la tabla completa de una variante (una fila por capacidad).
+   *msBase guarda el tiempo sin cache: la primera fila medida lo fija. */
+int mostrarBloque(const tEstrategia *e, int repeticiones, const tFuentes *f, double *msBase)
+{
+    const unsigned *p = e->usaCache ? capacidades : sinCapacidad;
+    const unsigned *fin = p + (e->usaCache ? CANTIDAD(capacidades) : CANTIDAD(sinCapacidad));
+    tContadores k;
+    double ms;
+    int ok = 1;
+
+    mostrarEncabezado(e);
+
+    while(p < fin && ok)
+    {
+        ms = medirSimulacion(e, *p, repeticiones, f, &k);
+        ok = ms >= 0.0;
+
+        if(ok)
+        {
+            if(*msBase <= 0.0)
+                *msBase = ms;
+
+            mostrarFila(e, *p, ms, *msBase, &k);
+        }
+
+        p++;
+    }
+
+    if(!ok)
+        printf("%s: error durante la simulacion\n", e->nombre);
+
+    return ok;
+}
+
+/* Corre todas las variantes de un lote, cada una en su propia tabla.
+   Antes hace una pasada sin medir para que el disco ya este en cache del sistema
+   y la variante que se mide primero no quede en desventaja. */
+int simularLote(const char *tipo, int repeticiones, const tFuentes *f)
+{
+    const tEstrategia *pe = estrategias;
+    const tEstrategia *fin = estrategias + CANTIDAD(estrategias);
+    tContadores k;
+    double msBase = 0.0;
+    int ok = realizarSimulacion(estrategias, 0, f, &k);
+
+    if(ok)
+        printf("\n--- Lote %s: %lu usuarios x %d posteos, %d repeticiones ---\n",
+               tipo, k.usuarios, LARGO_FEED, repeticiones);
+
+    while(pe < fin && ok)
+    {
+        ok = mostrarBloque(pe, repeticiones, f, &msBase);
+        pe++;
+    }
+
+    return ok ? SIM_OK : SIM_ERROR_ARCHIVO;
+}
+
+/* Ejecuta todas las variantes y capacidades sobre un lote y muestra las tablas */
 int ejecutarSimulacion(const char *tipo, int repeticiones)
 {
-    static const unsigned capacidades[] = {10, 100, 1000, 10000};
-    const unsigned *pc;
-    const unsigned *finC = capacidades + sizeof(capacidades) / sizeof(*capacidades);
-    const tEstrategia *pe;
-    const tEstrategia *finE = estrategias + sizeof(estrategias) / sizeof(*estrategias);
     char nombre[64];
-    tEscenario esc;
+    tFuentes f;
     int res;
-    int ok;
 
     if(repeticiones < 1)
         repeticiones = 1;
 
     snprintf(nombre, sizeof(nombre), FORMATO_USUARIOS, tipo);
-    res = abrirEscenario(&esc, nombre);
+    res = abrirFuentes(&f, nombre);
 
-    if(res != SIM_OK)
-    {
-        if(res == SIM_SIN_MEM)
-            printf("Sin memoria\n");
-        else
-            printf("No se pudo leer %s o %s (generalos con las opciones 1 a 3)\n", nombre, NOMBRE_POSTEOS);
+    if(res == SIM_OK)
+        res = simularLote(tipo, repeticiones, &f);
+    else if(res == SIM_SIN_MEM)
+        printf("Sin memoria\n");
+    else
+        printf("No se pudo leer %s o %s (generalos con las opciones 1 a 3)\n", nombre, NOMBRE_POSTEOS);
 
-        cerrarEscenario(&esc);
-        return res;
-    }
+    cerrarFuentes(&f);
 
-    printf("\n--- Lote %s: %u usuarios x %d posteos, %d repeticiones ---\n",
-           tipo, (unsigned)esc.cant, LARGO_FEED, repeticiones);
-    printf("%-10s %8s %10s %12s %11s %9s %7s %9s %6s\n",
-           "variante", "capacid.", "total(ms)", "us/usuario", "us/posteo",
-           "aciertos", "fallos", "lecturas", "altura");
-
-    ok = medirYMostrarFila(estrategias, 0, repeticiones, &esc);   /* sin cache */
-
-    for(pc = capacidades; pc < finC && ok; pc++)
-    {
-        for(pe = estrategias + 1; pe < finE && ok; pe++)
-            ok = medirYMostrarFila(pe, *pc, repeticiones, &esc);
-    }
-
-    cerrarEscenario(&esc);
-
-    return ok ? SIM_OK : SIM_ERROR_ARCHIVO;
+    return res;
 }

@@ -8,23 +8,6 @@
 #define ALFABETO         "abcdefghijklmnopqrstuvwxyz "
 #define CANT_PALABRAS    (sizeof(palabras) / sizeof(*palabras))
 
-typedef struct
-{
-    int *pool;                          /* posteos populares (lote concentrado) */
-    int tamPool;
-    unsigned long contador;             /* ids ya generados (lote ordenado) */
-    unsigned long total;                /* ids totales a generar */
-} tCtxLote;
-
-typedef int (*tGenerarId)(tCtxLote *ctx);
-typedef void (*tGenerarTexto)(char *texto);
-
-typedef struct
-{
-    const char *nombre;
-    tGenerarId generar;
-} tTipoLote;
-
 static const char *palabras[] =
 {
     /* saludos y expresiones */
@@ -49,8 +32,16 @@ static const char *palabras[] =
     "que", "para", "con", "sin", "pero", "porque", "tambien", "ya", "hay", "es"
 };
 
-/* Numero aleatorio en [0, n). Dos rand() en sentencias separadas: orden definido y rango > RAND_MAX */
-static unsigned long aleatorio(unsigned long n)
+/* Tabla indexada por TEXTO_LETRAS / TEXTO_PALABRAS */
+static const tGenerarTexto generadoresTexto[] =
+{
+    generarTextoLetrasAleatorias,
+    generarTextoPalabrasAleatorias
+};
+
+/* Devuelve un numero aleatorio en [0, n). Usa dos rand() en sentencias separadas
+   para tener orden definido y cubrir rangos mayores a RAND_MAX */
+unsigned long aleatorio(unsigned long n)
 {
     unsigned long alto = (unsigned long)rand();
     unsigned long bajo = (unsigned long)rand();
@@ -61,20 +52,20 @@ static unsigned long aleatorio(unsigned long n)
 /* ---------- generadores de id (uno por tipo de lote) ---------- */
 
 /* Lote concentrado: elige siempre dentro de un conjunto chico de posteos populares */
-static int idConcentrado(tCtxLote *ctx)
+int idConcentrado(tCtxLote *ctx)
 {
     return *(ctx->pool + aleatorio((unsigned long)ctx->tamPool));
 }
 
 /* Lote disperso: cualquier posteo con igual probabilidad */
-static int idDisperso(tCtxLote *ctx)
+int idDisperso(tCtxLote *ctx)
 {
     (void)ctx;
     return (int)aleatorio(CANT_POSTEOS);
 }
 
-/* Lote ordenado: estrictamente creciente en toda la simulacion (requiere total <= CANT_POSTEOS) */
-static int idOrdenado(tCtxLote *ctx)
+/* Lote ordenado: ids estrictamente crecientes en toda la simulacion (requiere total <= CANT_POSTEOS) */
+int idOrdenado(tCtxLote *ctx)
 {
     int id = (int)((ctx->contador * CANT_POSTEOS) / ctx->total);
 
@@ -84,7 +75,7 @@ static int idOrdenado(tCtxLote *ctx)
 }
 
 /* Busca la funcion generadora de un tipo de lote; NULL si no existe */
-static tGenerarId buscarTipo(const char *nombre)
+tGenerarId buscarTipo(const char *nombre)
 {
     static const tTipoLote tipos[] =
     {
@@ -104,7 +95,7 @@ static tGenerarId buscarTipo(const char *nombre)
 /* ---------- generadores de texto ---------- */
 
 /* Llena el texto con entre 1 y MAX_CARACTERES letras al azar */
-static void generarTextoLetrasAleatorias(char *texto)
+void generarTextoLetrasAleatorias(char *texto)
 {
     const char *fin = texto + 1 + aleatorio(MAX_CARACTERES);
     char *p;
@@ -114,15 +105,15 @@ static void generarTextoLetrasAleatorias(char *texto)
 }
 
 /* Elige una palabra al azar de la lista */
-static const char *elegirPalabra(void)
+const char *elegirPalabra(void)
 {
     return *(palabras + aleatorio(CANT_PALABRAS));
 }
 
-/* Arma el texto con palabras separadas por un espacio, hasta un largo objetivo
-   aleatorio de 1 a MAX_CARACTERES. Siempre lleva al menos una palabra y nunca
-   supera MAX_CARACTERES; el '\0' final queda por el memset previo. */
-static void generarTextoPalabrasAleatorias(char *texto)
+/* Arma el texto con palabras separadas por un espacio hasta un largo objetivo
+   aleatorio de 1 a MAX_CARACTERES. Lleva al menos una palabra y nunca supera
+   MAX_CARACTERES; el '\0' final lo deja el memset previo del registro. */
+void generarTextoPalabrasAleatorias(char *texto)
 {
     unsigned objetivo = 1 + (unsigned)aleatorio(MAX_CARACTERES);
     unsigned largo = 0;
@@ -143,79 +134,70 @@ static void generarTextoPalabrasAleatorias(char *texto)
     while(largo + 1 + tam <= objetivo);
 }
 
-/* Tabla indexada por TEXTO_LETRAS / TEXTO_PALABRAS */
-static const tGenerarTexto generadoresTexto[] =
+/* ---------- armado de registros y escritura de archivos ---------- */
+
+/* Completa un posteo: el id es su posicion en el archivo y el texto lo arma el generador elegido */
+void armarPosteo(void *registro, int numero, void *contexto)
 {
-    generarTextoLetrasAleatorias,
-    generarTextoPalabrasAleatorias
-};
+    tPosteo *post = registro;
 
-/* ---------- archivos binarios ---------- */
-
-/* Escribe el archivo de posteos: el id coincide con la posicion del registro */
-static int generarPosteos(const char *nombre)
-{
-    tGenerarTexto generarTexto = *(generadoresTexto + TEXTO_ELEGIDO);
-    FILE *pf = fopen(nombre, "wb");
-    tPosteo post;
-    int id;
-    int ok = 1;
-
-    if(!pf)
-        return SIM_ERROR_ARCHIVO;
-
-    for(id = 0; id < CANT_POSTEOS && ok; id++)
-    {
-        memset(&post, 0, sizeof(post));      /* archivo reproducible byte a byte */
-        post.id = id;
-        generarTexto(post.texto);
-        ok = fwrite(&post, sizeof(post), 1, pf) == 1;
-    }
-
-    if(fclose(pf) != 0)
-        ok = 0;
-
-    return ok ? SIM_OK : SIM_ERROR_ARCHIVO;
+    (void)contexto;
+    post->id = numero;
+    (*(generadoresTexto + TEXTO_ELEGIDO))(post->texto);
 }
 
-/* Escribe el archivo de usuarios, cada feed con ids del generador del lote */
-static int generarUsuarios(const char *nombre, int usuarios, tGenerarId generar, tCtxLote *ctx)
+/* Completa un usuario: nombre correlativo y feed con ids del generador del lote */
+void armarUsuario(void *registro, int numero, void *contexto)
+{
+    tUsuario *usu = registro;
+    tCtxLote *ctx = contexto;
+    int *p;
+
+    snprintf(usu->usuario, sizeof(usu->usuario), "usuario%05u", (unsigned)(numero + 1) % 100000u);
+
+    for(p = usu->feed; p < usu->feed + LARGO_FEED; p++)
+        *p = ctx->generar(ctx);
+}
+
+/* Escribe 'cantidad' registros en el archivo; cada uno se pone en cero antes de armarlo
+   para que el archivo sea reproducible byte a byte */
+int escribirArchivoRegistros(const char *nombre, int cantidad, unsigned tamRegistro,
+                             tArmarRegistro armar, void *contexto)
 {
     FILE *pf = fopen(nombre, "wb");
-    tUsuario usu;
+    void *registro = malloc(tamRegistro);
     int i;
-    int *p;
     int ok = 1;
 
-    if(!pf)
-        return SIM_ERROR_ARCHIVO;
-
-    for(i = 1; i <= usuarios && ok; i++)
+    if(!pf || !registro)
     {
-        memset(&usu, 0, sizeof(usu));
-        snprintf(usu.usuario, sizeof(usu.usuario), "usuario%05u", (unsigned)i % 100000u);
+        if(pf)
+            fclose(pf);
 
-        for(p = usu.feed; p < usu.feed + LARGO_FEED; p++)
-            *p = generar(ctx);
+        free(registro);
+        return pf ? SIM_SIN_MEM : SIM_ERROR_ARCHIVO;
+    }
 
-        ok = fwrite(&usu, sizeof(usu), 1, pf) == 1;
+    for(i = 0; i < cantidad && ok; i++)
+    {
+        memset(registro, 0, tamRegistro);
+        armar(registro, i, contexto);
+        ok = fwrite(registro, tamRegistro, 1, pf) == 1;
     }
 
     if(fclose(pf) != 0)
         ok = 0;
 
+    free(registro);
+
     return ok ? SIM_OK : SIM_ERROR_ARCHIVO;
 }
 
-/* Genera posteos.dat y usuarios_<tipo>.dat con sus .txt; la misma semilla reproduce el mismo lote */
-int generarLote(unsigned long semilla, const char *tipo, int usuarios, int tamPool)
-{
-    tGenerarId generar = buscarTipo(tipo);
-    char nombreUsu[64];
-    tCtxLote ctx;
-    int *p;
-    int res;
+/* ---------- preparacion del lote ---------- */
 
+/* Verifica tipo, cantidad de usuarios y pool; informa el motivo si algo es invalido */
+int validarLote(tGenerarId generar, int usuarios, int tamPool)
+{
     if(!generar || usuarios < USUARIOS_MIN || usuarios > USUARIOS_MAX
             || tamPool < 1 || tamPool > CANT_POSTEOS)
     {
@@ -224,43 +206,78 @@ int generarLote(unsigned long semilla, const char *tipo, int usuarios, int tamPo
         return SIM_PARAM_INVALIDO;
     }
 
-    ctx.total = (unsigned long)usuarios * LARGO_FEED;
-    ctx.contador = 0;
-    ctx.tamPool = tamPool;
-
-    if(generar == idOrdenado && ctx.total > CANT_POSTEOS)
+    if(generar == idOrdenado && (unsigned long)usuarios * LARGO_FEED > CANT_POSTEOS)
     {
         printf("Lote ordenado: usuarios * %d no puede superar %d (maximo %d usuarios)\n",
                LARGO_FEED, CANT_POSTEOS, CANT_POSTEOS / LARGO_FEED);
         return SIM_PARAM_INVALIDO;
     }
 
-    ctx.pool = malloc(tamPool * sizeof(int));
+    return SIM_OK;
+}
 
-    if(!ctx.pool)
-    {
-        printf("Sin memoria\n");
+/* Inicializa el contexto: siembra el generador y arma el pool de posteos populares.
+   El pool se sortea siempre (aunque el lote no lo use) para que una misma semilla
+   produzca siempre los mismos archivos. */
+int iniciarContextoLote(tCtxLote *ctx, tGenerarId generar, int usuarios, int tamPool, unsigned long semilla)
+{
+    int *p;
+
+    ctx->generar = generar;
+    ctx->total = (unsigned long)usuarios * LARGO_FEED;
+    ctx->contador = 0;
+    ctx->tamPool = tamPool;
+    ctx->pool = malloc(tamPool * sizeof(int));
+
+    if(!ctx->pool)
         return SIM_SIN_MEM;
-    }
 
     srand((unsigned)semilla);
 
-    for(p = ctx.pool; p < ctx.pool + tamPool; p++)
+    for(p = ctx->pool; p < ctx->pool + tamPool; p++)
         *p = (int)aleatorio(CANT_POSTEOS);
 
-    snprintf(nombreUsu, sizeof(nombreUsu), FORMATO_USUARIOS, tipo);
+    return SIM_OK;
+}
 
-    res = generarPosteos(NOMBRE_POSTEOS);
+/* Escribe los dos binarios del lote y sus versiones .txt (en ese orden) */
+int escribirArchivosLote(const char *nombreUsuarios, int usuarios, tCtxLote *ctx)
+{
+    int res = escribirArchivoRegistros(NOMBRE_POSTEOS, CANT_POSTEOS, sizeof(tPosteo), armarPosteo, NULL);
 
     if(res == SIM_OK)
-        res = generarUsuarios(nombreUsu, usuarios, generar, &ctx);
+        res = escribirArchivoRegistros(nombreUsuarios, usuarios, sizeof(tUsuario), armarUsuario, ctx);
 
     if(res == SIM_OK)
         res = exportarATexto(NOMBRE_POSTEOS, sizeof(tPosteo), formatearPosteo);
 
     if(res == SIM_OK)
-        res = exportarATexto(nombreUsu, sizeof(tUsuario), formatearUsuario);
+        res = exportarATexto(nombreUsuarios, sizeof(tUsuario), formatearUsuario);
 
+    return res;
+}
+
+/* Genera posteos.dat y usuarios_<tipo>.dat con sus .txt; la misma semilla reproduce el mismo lote */
+int generarLote(unsigned long semilla, const char *tipo, int usuarios, int tamPool)
+{
+    tGenerarId generar = buscarTipo(tipo);
+    char nombreUsu[64];
+    tCtxLote ctx;
+    int res = validarLote(generar, usuarios, tamPool);
+
+    if(res != SIM_OK)
+        return res;
+
+    res = iniciarContextoLote(&ctx, generar, usuarios, tamPool, semilla);
+
+    if(res != SIM_OK)
+    {
+        printf("Sin memoria\n");
+        return res;
+    }
+
+    snprintf(nombreUsu, sizeof(nombreUsu), FORMATO_USUARIOS, tipo);
+    res = escribirArchivosLote(nombreUsu, usuarios, &ctx);
     free(ctx.pool);
 
     if(res != SIM_OK)
